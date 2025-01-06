@@ -2,7 +2,6 @@ package io.socket.java;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Map;
@@ -15,9 +14,10 @@ import io.socket.java.protocol.Packet;
 import io.socket.java.protocol.PacketBinary;
 import io.socket.java.protocol.PacketJson;
 import io.socket.java.protocol.PacketText;
-import redis.clients.jedis.Jedis;
-import redis.clients.jedis.JedisPool;
-import redis.clients.jedis.JedisPoolConfig;
+import org.redisson.Redisson;
+import org.redisson.api.RTopic;
+import org.redisson.api.RedissonClient;
+import org.redisson.config.Config;
 
 public class Emitter {
 
@@ -37,39 +37,45 @@ public class Emitter {
 	private static int BINARY_EVENT = 5;
 
 	private String key;
-	private ArrayList<String> rooms = new ArrayList<String>();
-	private HashMap<String, Object> flags = new HashMap<String, Object>();
-	private JedisPool redis;
+	private ArrayList<String> rooms = new ArrayList<>();
+	private HashMap<String, Object> flags = new HashMap<>();
+	private RedissonClient redisson;
 
 	private static Emitter instance = null;
 
-	private Emitter(JedisPool redis, Map<String, String> opts) {
+	private Emitter(RedissonClient redisson, Map<String, String> opts) {
 		if (opts.containsKey("key")) {
-			this.key = opts.get("key").toString() + "#emitter";
+			this.key = opts.get("key") + "#emitter";
 		} else {
 			this.key = "socket.io#";
 		}
 
-		if (redis == null) {
+		if (redisson == null) {
 			if (!opts.containsKey("host"))
 				throw new Error("Missing redis `host`");
 			if (!opts.containsKey("port"))
 				throw new Error("Missing redis `port`");
 
-			this.redis = new JedisPool(new JedisPoolConfig(), opts.get("host"), Integer.parseInt(opts.get("port")));
+			Config config = new Config();
+			config.useSingleServer()
+					.setAddress("redis://" + opts.get("host") + ":" + opts.get("port"));
+
+			this.redisson = Redisson.create(config);
+		} else {
+			this.redisson = redisson;
 		}
 	}
 
 	/**
-	 * Socket.IO redis based emitter.
+	 * Socket.IO Redis-based emitter.
 	 *
-	 * @param redis redis client
-	 * @param opts  option values
+	 * @param redisson Redisson client
+	 * @param opts     Option values
 	 * @return emitter
 	 */
-	public static synchronized Emitter getInstance(JedisPool redis, Map<String, String> opts) {
+	public static synchronized Emitter getInstance(RedissonClient redisson, Map<String, String> opts) {
 		if (instance == null) {
-			instance = new Emitter(redis, opts);
+			instance = new Emitter(redisson, opts);
 		}
 		return instance;
 	}
@@ -83,20 +89,10 @@ public class Emitter {
 		return get(Flag.JSON);
 	}
 
-	/**
-	 * Apply flags from `Socket`.
-	 *
-	 * @return emitter
-	 */
 	public Emitter _volatile() {
 		return get(Flag.VOLATILE);
 	}
 
-	/**
-	 * Apply flags from `Socket`.
-	 *
-	 * @return emitter
-	 */
 	public Emitter broadcast() {
 		return get(Flag.BROADCAST);
 	}
@@ -108,16 +104,14 @@ public class Emitter {
 
 	/**
 	 * Limit emission to a certain `room`.
-	 * 
-	 * @param {String} room
 	 */
 	public Emitter to(String room) {
 		if (!rooms.contains(room)) {
 			this.rooms.add(room);
 		}
-		this.key+= room + "#";
+		this.key += room + "#";
 		return this;
-	};
+	}
 
 	public Emitter in(String room) {
 		return this.to(room);
@@ -125,13 +119,10 @@ public class Emitter {
 
 	/**
 	 * Limit emission to certain `namespace`.
-	 *
-	 * @param {String} namespace
 	 */
-
 	public Emitter of(String nsp) {
 		this.flags.put("nsp", nsp);
-		this.key+= nsp + "#";
+		this.key += nsp + "#";
 		return this;
 	}
 
@@ -140,8 +131,8 @@ public class Emitter {
 		packet.setType(EVENT);
 
 		packet.getData().add(event);
-		for (int i = 0; i < data.length; i++) {
-			packet.getData().add(data[i]);
+		for (String datum : data) {
+			packet.getData().add(datum);
 		}
 
 		return this.emit(packet);
@@ -166,7 +157,6 @@ public class Emitter {
 	}
 
 	private Emitter emit(Packet packet) throws IOException {
-
 		if (this.flags.containsKey("nsp")) {
 			packet.setNsp((String) this.flags.get("nsp"));
 			this.flags.remove("nsp");
@@ -185,23 +175,27 @@ public class Emitter {
 
 		byte[] msg = out.toByteArray();
 
-		Jedis jedis = null;
-
 		try {
-			jedis = this.redis.getResource();
-			jedis.publish(this.key.getBytes(Charset.forName("UTF-8")), msg);
-		} finally {
-			if (jedis != null) {
-				jedis.close();
-			} else {
-				this.redis.destroy();
-			}
+			RTopic topic = redisson.getTopic(this.key);
+			topic.publish(msg);
+		} catch (Exception e) {
+			throw new IOException("Failed to publish message to Redis topic", e);
 		}
-		// reset state
-		this.rooms = new ArrayList<String>();
-		this.flags = new HashMap<String, Object>();
+
+		// Reset state
+		this.rooms = new ArrayList<>();
+		this.flags = new HashMap<>();
 		this.key = "socket.io#";
 
 		return this;
+	}
+
+	/**
+	 * Clean up resources.
+	 */
+	public void shutdown() {
+		if (this.redisson != null) {
+			this.redisson.shutdown();
+		}
 	}
 }
