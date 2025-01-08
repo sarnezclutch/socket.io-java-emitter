@@ -5,14 +5,16 @@ socket.io-java-emitter
 
 A Java implementation of socket.io-emitter
 
-This project uses [msgpack-java](https://github.com/msgpack/msgpack-java) and [jedis](https://github.com/xetorthio/jedis).
+This project uses [msgpack-java](https://github.com/msgpack/msgpack-java) and [redisson](https://github.com/redisson/redisson).
 
 ## Usage
 
 ### Using an existing redis instance
 ```java
-JedisPool jedis = new JedisPool(new JedisPoolConfig(), "127.0.0.1", 6379);
-Emitter emitter = Emitter.getInstance(jedis, new HashMap<String,String>());
+Config config = new Config();
+config.useSingleServer().setAddress("redis://127.0.0.1:6379");
+RedissonClient redisson = Redisson.create(config);
+Emitter emitter = Emitter.getInstance(redisson, new HashMap<String,String>());
 Emitter emitter = Emitter.getInstance(null, opts);
 emitter.of("/namespace").emit("event", "Hello World!");
 ```
